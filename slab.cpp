@@ -9,6 +9,26 @@ void *g_page_free_list;
 meminfo_t g_meminfo;
 cache_t *g_caches; // obj_size 2^5~2^9
 
+void check_null_in_obj_list_hd(cache_t *cc)
+{
+    slab_t *slab_ptr = cc->slab_list;
+    if (!slab_ptr)
+        return;
+
+    do
+    {
+        assert(slab_ptr);
+        slab_ptr = slab_ptr->next;
+    } while (slab_ptr != cc->slab_list);
+
+    slab_ptr = cc->slab_list;
+    do
+    {
+        assert(slab_ptr);
+        slab_ptr = slab_ptr->prev;
+    } while (slab_ptr != cc->slab_list);
+}
+
 void *alloc_one_page()
 {
     void *ret = g_page_free_list;
@@ -47,11 +67,13 @@ slab_t *alloc_one_slab(uint32 obj_size, cache_t *parent_cache) // init
     slab_t *p_slab = (slab_t *)alloc_one_page();
     if (!p_slab)
         return 0;
-    p_slab->prev = p_slab->next = p_slab;
+    p_slab->prev = p_slab;
+    p_slab->next = p_slab;
     p_slab->cache_ptr = parent_cache;
     p_slab->bitmap = (uint32 *)(p_slab + 1);
-    p_slab->obj_num_limit = p_slab->obj_num = 0;
-    uint32 space = PAGE_SIZE - sizeof(slab_t);
+    p_slab->obj_num = 0;
+    p_slab->obj_num_limit = 0;
+    int space = PAGE_SIZE - sizeof(slab_t);
     while (space > obj_size + sizeof(uint32))
     {
         space -= (obj_size + sizeof(uint32));
@@ -59,13 +81,15 @@ slab_t *alloc_one_slab(uint32 obj_size, cache_t *parent_cache) // init
     }
     // set obj arr
     p_slab->obj_arr = (void *)&p_slab->bitmap[p_slab->obj_num_limit];
-    // set obj list
+    // init obj list
     uint32 i;
-    for (i = 0, p_slab->obj_list_hd = p_slab->obj_arr; i + 1 < p_slab->obj_num_limit; i++)
+    for (i = 0; i < p_slab->obj_num_limit; i++)
     {
-        *(void **)((uint8 *)p_slab->obj_arr + obj_size * i) = (void *)((uint8 *)p_slab->obj_arr + obj_size * (i + 1));
+        int nxt_idx = (i + 1) % p_slab->obj_num_limit;
+        *(void **)((uint8 *)p_slab->obj_arr + obj_size * i) = (void *)((uint8 *)p_slab->obj_arr + obj_size * nxt_idx);
     }
-    *(void **)((uint8 *)p_slab->obj_arr + obj_size * i) = 0;
+    // set obj list
+    p_slab->obj_list_hd = p_slab->obj_arr;
 
     if (p_slab->cache_ptr)
     {
@@ -108,11 +132,11 @@ void init_g_caches()
     g_meminfo.all_caches = alloc_one_slab(obj_size, 0);
     g_caches = (cache_t *)g_meminfo.all_caches->obj_arr;
 
-    int i;
-    for (i = g_meminfo.start_order; i < g_meminfo.end_order; i++)
+    int order;
+    for (order = g_meminfo.start_order; order < g_meminfo.end_order; order++)
     {
-        cache_t *cc = &g_caches[i - g_meminfo.start_order];
-        cc->obj_size = 1 << i;
+        cache_t *cc = &g_caches[order - g_meminfo.start_order];
+        cc->obj_size = 1 << order;
         cc->slab_list = 0;
         cc->slab_num = 0;
     }
@@ -134,7 +158,7 @@ void *alloc_obj(uint32 size) // 2^5~2^9
 {                            // check size
     int i;
     cache_t *pcache = 0;
-    slab_t *slab_ptr=0;
+    slab_t *slab_ptr = 0;
     void *ret = 0;
     for (i = 0; i < g_meminfo.end_order - g_meminfo.start_order; i++)
     {
@@ -151,7 +175,8 @@ void *alloc_obj(uint32 size) // 2^5~2^9
     }
     assert(pcache);
 
-    // 1. try to allocte from existing slab
+    // find a slab to alloc new object
+    // 1. alloc from existing slab
     if (pcache->slab_list)
     {
         slab_t *tmp = pcache->slab_list;
@@ -159,47 +184,38 @@ void *alloc_obj(uint32 size) // 2^5~2^9
         {
             if (tmp->obj_num < tmp->obj_num_limit)
             {
-
-                ull idx = ((ull)tmp->obj_list_hd - (ull)tmp->obj_arr) / size;
-                assert(tmp->obj_list_hd >= tmp->obj_arr);
-                assert(((ull)tmp->obj_list_hd - (ull)tmp->obj_arr) % size == 0);
-                assert(!tmp->bitmap[idx]);
-
-                ret = tmp->obj_list_hd;
-                tmp->obj_list_hd = *(void **)tmp->obj_list_hd;
-
-                tmp->bitmap[idx] = 1;
-                tmp->obj_num++;
-
-#ifdef DDEBUG
-                cout << "alloc obj " << ret << " on partial slab " << tmp << ", new obj idx " << idx << endl;
-#endif
-                return ret;
+                slab_ptr = tmp;
+                break;
             }
             tmp = tmp->next;
         } while (tmp != pcache->slab_list);
     }
 
     // 2. all slabs are full || no slab, need to create new slab
+    if (!slab_ptr)
+    {
+        slab_ptr = alloc_one_slab(size, pcache);
+    }
 
-    // alloc and init a slab
-    slab_ptr = alloc_one_slab(size, pcache);
-
+    // 3. handle corner case
     if (!slab_ptr)
     {
         cout << "alloc_one_slab return null" << endl;
         return 0;
     }
 
-    // alloc a obj
-    ull idx = ((ull)slab_ptr->obj_list_hd - (ull)slab_ptr->obj_arr) / size;
+    // check offset
     assert(slab_ptr->obj_list_hd >= slab_ptr->obj_arr);
     assert(((ull)slab_ptr->obj_list_hd - (ull)slab_ptr->obj_arr) % size == 0);
+    // check bitmap
+    ull idx = ((ull)slab_ptr->obj_list_hd - (ull)slab_ptr->obj_arr) / size;
     assert(!slab_ptr->bitmap[idx]);
-
+    // modify slab's link list
     ret = slab_ptr->obj_list_hd;
     slab_ptr->obj_list_hd = *(void **)slab_ptr->obj_list_hd;
+    // modify bitmap
     slab_ptr->bitmap[idx] = 1;
+    // modify objnum
     slab_ptr->obj_num++;
     return ret;
 }
@@ -211,6 +227,8 @@ void free_one_slab(slab_t *p_slab)
 
     if (p_slab->next != p_slab)
     {
+        assert(p_slab->cache_ptr);
+        assert(p_slab->cache_ptr->slab_num > 1);
         p_slab->next->prev = p_slab->prev;
         p_slab->prev->next = p_slab->next;
         p_slab->prev = p_slab->next = p_slab;
@@ -218,6 +236,7 @@ void free_one_slab(slab_t *p_slab)
     else
     {
         assert(p_slab->cache_ptr);
+        assert(p_slab->cache_ptr->slab_num == 1);
         p_slab->cache_ptr->slab_list = 0;
     }
 
@@ -239,16 +258,18 @@ void free_obj(void *addr)
             void *ed = (uint8 *)slab_ptr->obj_arr + g_caches[i].obj_size * slab_ptr->obj_num;
             if (addr < ed && addr >= st)
             {
-                ull idx = ((ull)addr - (ull)slab_ptr->obj_arr) / g_caches[i].obj_size;
+                // check offset
                 assert(((ull)addr - (ull)slab_ptr->obj_arr) % g_caches[i].obj_size == 0);
+                // check bitmap
+                ull idx = ((ull)addr - (ull)slab_ptr->obj_arr) / g_caches[i].obj_size;
                 assert(slab_ptr->bitmap[idx]);
-
+                // modify bitmap
                 slab_ptr->bitmap[idx] = 0;
-
-                slab_ptr->obj_num--;
-
+                // modify obj linklist
                 *(void **)addr = slab_ptr->obj_list_hd;
                 slab_ptr->obj_list_hd = addr;
+                // modify objnum
+                slab_ptr->obj_num--;
 #ifdef DDEBUG
                 cout << "free on slab " << slab_ptr << " obj " << addr << ", idx " << idx << endl;
 #endif
@@ -282,11 +303,7 @@ void print_g_meminfo()
          << endl;
 }
 
-void check_null_in_obj_list_hd(){
-
-}
-
-void test()
+void test(int ord)
 {
     void *ret = 0;
     void **obj_stack = (void **)alloc_one_page();
@@ -298,7 +315,7 @@ void test()
         int op = rand() & 1;
         if (op)
         {
-            ret = alloc_obj(1 << 8);
+            ret = alloc_obj(1 << ord);
             obj_stack[alloc_num++] = ret;
             a++;
         }
@@ -315,9 +332,14 @@ void test()
              << ",test obj_stack size " << alloc_num;
         print_g_meminfo();
 #endif
-
+        check_null_in_obj_list_hd(g_caches + ord - g_meminfo.start_order);
         assert((g_meminfo.page_alloc_cnt - g_meminfo.page_free_cnt) * PAGE_SIZE == g_meminfo.allocated);
         assert(g_meminfo.allocated + g_meminfo.free == MEM_SIZE);
+
+        if (rand() % 1000 == 0)
+        {
+            print_g_meminfo();
+        }
     }
 }
 
@@ -326,6 +348,6 @@ int main()
     srand(time(NULL));
     init_g_page_free_list();
     init_g_caches();
-    test();
+    test(8);
     return 0;
 }

@@ -29,10 +29,10 @@ typedef struct slab_s
     struct slab_s *next;
     cache_t *cache_ptr;
     uint32 *bitmap; // 4 byte, for align
+    uint32 obj_num;
+    uint32 obj_num_limit;
     void *obj_arr;
     void *obj_list_hd;
-    uint32 obj_num_limit;
-    uint32 obj_num;
 } slab_t;
 
 typedef struct meminfo_s
