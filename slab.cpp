@@ -9,26 +9,6 @@ void *g_page_free_list;
 meminfo_t g_meminfo;
 cache_t *g_caches; // obj_size 2^5~2^9
 
-void check_null_in_obj_list_hd(cache_t *cc)
-{
-    slab_t *slab_ptr = cc->slab_list;
-    if (!slab_ptr)
-        return;
-
-    do
-    {
-        assert(slab_ptr);
-        slab_ptr = slab_ptr->next;
-    } while (slab_ptr != cc->slab_list);
-
-    slab_ptr = cc->slab_list;
-    do
-    {
-        assert(slab_ptr);
-        slab_ptr = slab_ptr->prev;
-    } while (slab_ptr != cc->slab_list);
-}
-
 void *alloc_one_page()
 {
     void *ret = g_page_free_list;
@@ -118,40 +98,28 @@ slab_t *alloc_one_slab(uint32 obj_size, cache_t *parent_cache) // init
     return p_slab;
 }
 
-void init_g_caches()
+void free_one_slab(slab_t *p_slab)
 {
-    g_meminfo.allocated = g_meminfo.page_alloc_cnt = g_meminfo.page_free_cnt = 0;
-    g_meminfo.free = MEM_SIZE;
-    g_meminfo.start_order = 5;
-    g_meminfo.end_order = 10;
+    assert(!p_slab->obj_num);
+    assert(p_slab->cache_ptr);
 
-    int obj_size = 1;
-    while (obj_size < sizeof(cache_t))
-        obj_size <<= 1;
-
-    g_meminfo.all_caches = alloc_one_slab(obj_size, 0);
-    g_caches = (cache_t *)g_meminfo.all_caches->obj_arr;
-
-    int order;
-    for (order = g_meminfo.start_order; order < g_meminfo.end_order; order++)
+    if (p_slab->next != p_slab)
     {
-        cache_t *cc = &g_caches[order - g_meminfo.start_order];
-        cc->obj_size = 1 << order;
-        cc->slab_list = 0;
-        cc->slab_num = 0;
+        assert(p_slab->cache_ptr);
+        assert(p_slab->cache_ptr->slab_num > 1);
+        p_slab->next->prev = p_slab->prev;
+        p_slab->prev->next = p_slab->next;
+        p_slab->prev = p_slab->next = p_slab;
     }
-}
-
-void init_g_page_free_list()
-{
-    uint8 *p = g_mem;
-    g_page_free_list = (void *)p;
-    while (p - (uint8 *)g_page_free_list < MEM_SIZE)
+    else
     {
-        uint8 *nxt = p + PAGE_SIZE;
-        *(void **)p = (void *)nxt;
-        p = nxt;
+        assert(p_slab->cache_ptr);
+        assert(p_slab->cache_ptr->slab_num == 1);
+        p_slab->cache_ptr->slab_list = 0;
     }
+
+    p_slab->cache_ptr->slab_num--;
+    free_one_page(p_slab);
 }
 
 void *alloc_obj(uint32 size) // 2^5~2^9
@@ -220,30 +188,6 @@ void *alloc_obj(uint32 size) // 2^5~2^9
     return ret;
 }
 
-void free_one_slab(slab_t *p_slab)
-{
-    assert(!p_slab->obj_num);
-    assert(p_slab->cache_ptr);
-
-    if (p_slab->next != p_slab)
-    {
-        assert(p_slab->cache_ptr);
-        assert(p_slab->cache_ptr->slab_num > 1);
-        p_slab->next->prev = p_slab->prev;
-        p_slab->prev->next = p_slab->next;
-        p_slab->prev = p_slab->next = p_slab;
-    }
-    else
-    {
-        assert(p_slab->cache_ptr);
-        assert(p_slab->cache_ptr->slab_num == 1);
-        p_slab->cache_ptr->slab_list = 0;
-    }
-
-    p_slab->cache_ptr->slab_num--;
-    free_one_page(p_slab);
-}
-
 void free_obj(void *addr)
 {
     uint32 i;
@@ -285,6 +229,42 @@ void free_obj(void *addr)
     }
 }
 
+void init_g_caches()
+{
+    g_meminfo.allocated = g_meminfo.page_alloc_cnt = g_meminfo.page_free_cnt = 0;
+    g_meminfo.free = MEM_SIZE;
+    g_meminfo.start_order = 5;
+    g_meminfo.end_order = 10;
+
+    int obj_size = 1;
+    while (obj_size < sizeof(cache_t))
+        obj_size <<= 1;
+
+    g_meminfo.all_caches = alloc_one_slab(obj_size, 0);
+    g_caches = (cache_t *)g_meminfo.all_caches->obj_arr;
+
+    int order;
+    for (order = g_meminfo.start_order; order < g_meminfo.end_order; order++)
+    {
+        cache_t *cc = &g_caches[order - g_meminfo.start_order];
+        cc->obj_size = 1 << order;
+        cc->slab_list = 0;
+        cc->slab_num = 0;
+    }
+}
+
+void init_g_page_free_list()
+{
+    uint8 *p = g_mem;
+    g_page_free_list = (void *)p;
+    while (p - (uint8 *)g_page_free_list < MEM_SIZE)
+    {
+        uint8 *nxt = p + PAGE_SIZE;
+        *(void **)p = (void *)nxt;
+        p = nxt;
+    }
+}
+
 void print_g_meminfo()
 {
     int tot_slab = 0;
@@ -301,6 +281,26 @@ void print_g_meminfo()
          << " ,tot slab " << tot_slab
          //  << ",(g_meminfo.page_alloc_cnt- g_meminfo.page_free_cnt)*PAGE_SIZE " << (g_meminfo.page_alloc_cnt - g_meminfo.page_free_cnt) * PAGE_SIZE
          << endl;
+}
+
+void check_null_in_obj_list_hd(cache_t *cc)
+{
+    slab_t *slab_ptr = cc->slab_list;
+    if (!slab_ptr)
+        return;
+
+    do
+    {
+        assert(slab_ptr);
+        slab_ptr = slab_ptr->next;
+    } while (slab_ptr != cc->slab_list);
+
+    slab_ptr = cc->slab_list;
+    do
+    {
+        assert(slab_ptr);
+        slab_ptr = slab_ptr->prev;
+    } while (slab_ptr != cc->slab_list);
 }
 
 void test(int ord)
