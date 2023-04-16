@@ -14,7 +14,7 @@ struct meminfo_s;
 typedef struct cache_s
 {
     struct slab_s *slab_list;
-    uint32 obj_size; // 2^5~2^9
+    int obj_size; // 2^5~2^9
     ull allocated;
     ull free;
     int slab_num;
@@ -28,9 +28,9 @@ typedef struct slab_s
     struct slab_s *prev;
     struct slab_s *next;
     cache_t *cache_ptr;
-    uint32 *bitmap; // 4 byte, for align
-    uint32 obj_num;
-    uint32 obj_num_limit;
+    int *bitmap; // 4 byte, for align
+    int obj_num;
+    int obj_num_limit;
     void *obj_arr;
     void *obj_list_hd;
 } slab_t;
@@ -45,3 +45,31 @@ typedef struct meminfo_s
     int page_alloc_cnt;
     int page_free_cnt;
 } meminfo_t;
+
+#define CHECK_SLAB(p_slab)                                                                         \
+    do                                                                                             \
+    {                                                                                              \
+        assert(p_slab);                                                                            \
+        assert(p_slab->obj_num >= 0);                                                              \
+        assert(p_slab->obj_num_limit > 0);                                                         \
+        assert(p_slab->obj_num <= p_slab->obj_num_limit);                                          \
+        assert(p_slab->cache_ptr);                                                                 \
+        assert(p_slab->obj_arr);                                                                   \
+        assert(p_slab->prev);                                                                      \
+        assert(p_slab->next);                                                                      \
+        assert(p_slab->next->prev);                                                                \
+        assert(p_slab->prev->next);                                                                \
+        assert(p_slab->next->prev == p_slab);                                                      \
+        assert(p_slab->prev->next == p_slab);                                                      \
+        assert(p_slab->obj_list_hd || (p_slab->obj_num == p_slab->obj_num_limit));                 \
+        assert((ull)p_slab->bitmap == (ull)p_slab + sizeof(slab_t));                               \
+        assert((ull)p_slab->bitmap + p_slab->obj_num_limit * sizeof(int) == (ull)p_slab->obj_arr); \
+        int cnt = 0;                                                                               \
+        void *obj = p_slab->obj_list_hd;                                                           \
+        while (obj)                                                                                \
+        {                                                                                          \
+            obj = *(void **)obj;                                                                   \
+            cnt++;                                                                                 \
+        }                                                                                          \
+        assert(cnt + p_slab->obj_num == p_slab->obj_num_limit);                                    \
+    } while (0);
